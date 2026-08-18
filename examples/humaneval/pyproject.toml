@@ -1,0 +1,14 @@
+[project]
+name = "cadtopo-humaneval"
+version = "0.1.0"
+description = "HumanEval example for CADTopo — runs the four-role team over HumanEval and grades pass@1"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cadtopo",
+]
+
+# CADTopo is the parent library; consume it as an editable path dependency so
+# changes under ../../src are picked up without reinstalling.
+[tool.uv.sources]
+cadtopo = { path = "../..", editable = true }

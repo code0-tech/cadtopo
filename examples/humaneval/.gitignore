@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+
+# Environment / secrets
+.env
+
+# Cached dataset (downloaded on first run) and run artifacts
+data/
+runs/

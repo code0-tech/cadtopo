@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# CADTopo run artifacts (examples write here)
+runs/
+data/
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+
+# Environment
+.env
+examples/.env
