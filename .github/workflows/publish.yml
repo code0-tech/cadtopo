@@ -1,0 +1,38 @@
+name: Publish package
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+
+    environment: packages
+
+    permissions:
+      # Required for PyPI trusted publishing (OIDC); no API token needed.
+      id-token: write
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Set version
+        # The git tag (minus any leading "v") becomes the package version.
+        run: uv version "${GITHUB_REF_NAME#v}"
+      - name: Run tests
+        run: uv run pytest
+      - name: Build package
+        run: uv build
+      - name: Publish package
+        run: uv publish --trusted-publishing always
