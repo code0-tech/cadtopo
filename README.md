@@ -1,162 +1,200 @@
-# CADTopo
+<br/>
+<br/>
+<div align="center">
 
-Cost-aware, dynamic-topology multi-agent LLM orchestration. CADTopo implements
-[DyTopo](https://arxiv.org/abs/2602.06039)'s protocol — per-round agent
-selection, a communication topology induced from the agents' own
-offer/demand descriptors, and a meta-agent that scores each round and
-decides whether to halt — plus a cost-aware routing extension.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/Codezero_Logo_White.svg">
+  <img src="images/Codezero_Logo.svg" alt="CodeZero" width="200">
+</picture>
 
-## Why
+### Every great idea starts at zero. <br/> Start with CodeZero.
 
-Static multi-agent pipelines (fixed roles, fixed order) waste calls on
-agents that aren't relevant to a given task, and can't skip ahead when a
-round already produced a correct answer. CADTopo instead:
+**The open-source platform for building automations visually.<br/>Powered by AI, running wherever you want.**
 
-1. picks which agents participate **each round**, based on how well their
-   skill matches the current goal (a cheap embedding gate, no LLM call);
-2. lets the participating agents run **in parallel**, each on its own view
-   of the task and its private memory;
-3. **induces a communication graph** after the fact, from what each agent
-   says it can offer and what it still needs — so information routes to
-   where it's useful without a fixed pipeline;
-4. has a **manager** score the round's best output and either halt or set a
-   focused goal for the next round, instead of running a fixed number of
-   rounds regardless of progress.
+[![Website](https://img.shields.io/badge/codezero.build-000000?logo=googlechrome&logoColor=white&style=for-the-badge)](https://codezero.build)
+[![Docs](https://img.shields.io/badge/Docs-4B32C3?logo=readthedocs&logoColor=white&style=for-the-badge)](https://docs.codezero.build)
+[![Discord](https://img.shields.io/discord/1173625923724124200?label=Discord&logo=discord&style=for-the-badge)](https://discord.com/invite/AyMB7DtA7P)
+[![YouTube](https://img.shields.io/badge/YouTube-FF0000?logo=youtube&logoColor=white&style=for-the-badge)](https://www.youtube.com/@CodeZeroBuild)
+[![Instagram](https://img.shields.io/badge/Instagram-E4405F?logo=instagram&logoColor=white&style=for-the-badge)](https://www.instagram.com/codezero.tech/)
 
-## Architecture
+</div>
+
+<br/>
+<br/>
+
+## What is CADTopo?
+
+**CADTopo** (*Cost-Aware Dynamic-Topology*) is a framework for orchestrating **teams of LLM agents** that collaborate to solve a task. Instead of a fixed pipeline, the agents that participate — and how they pass information to each other — are decided **fresh every round**, and each agent runs on the **cheapest model that the current risk justifies**.
+
+It is an implementation of the [DyTopo](https://arxiv.org/) protocol, extended with cost-aware model routing. In short:
+
+- **Per-round agent selection** — only the agents relevant to the current goal are activated (no LLM calls wasted on the rest).
+- **Dynamic topology** — the agents describe what they can *offer* and what they *need*, and the router builds the round's communication graph from those descriptors.
+- **A manager (meta-agent)** — reads each round's output, picks the deliverable, scores it, and decides whether to stop or set a new goal.
+- **Cost-aware routing** — every agent and the manager carry a *ladder* of models (cheap → expensive) and climb it only when the signal (low confidence, low score, running out of rounds) warrants it.
+
+> **In one sentence:** the right agents, wired the right way, on the cheapest model that gets the job done — decided anew each round.
+
+---
+
+## How it works
+
+Each **round** runs in two phases so information can flow *within* the round:
 
 ```
-src/cadtopo/
-├── agent.py          SubModel — one worker agent (role, backbone, optional tools)
-├── router.py          CADTopoRouter — coarse selection (Stage 1) + topology induction (Stage 2/3)
-├── manager.py          ManagerModel — the meta-agent: scores each round, sets the next goal
-├── orchestrator.py     CADTopoSystem — runs the full round loop end to end
-├── parsing.py           Delimiter-based response parsing shared by agents + manager
-├── llm.py                completion_with_retry — the one choke point for every LLM call
-├── embedding.py           EmbeddingModel — local sentence-transformers backend for routing
-├── telemetry.py           CostTracker + CallLog — token accounting and a verbatim call log
-├── logging_utils.py        Coloured console logging
-├── tracing.py               Recording wrappers + TraceCollector, for persisting a full run
-└── benchmarks/
-    └── humaneval.py          HumanEval loader + sandboxed evaluator, used by the example
+                    ┌─────────────────────────────────────────┐
+   user task  ──▶   │ 1. COARSE SELECT   which agents run?     │  (embedding match, no LLM)
+                    │ 2. DESCRIBE        what do they offer /   │  (cheap LLM pass)
+                    │                    need this round?       │
+                    │ 3. TOPOLOGY        build the round graph  │  (router, no LLM)
+                    │ 4. WORK            run agents in order,    │  (the real work)
+                    │                    routing hand-offs      │
+                    │ 5. REVIEW          manager scores & picks │  (manager LLM pass)
+                    └─────────────────────────────────────────┘
+                                     │
+                       halt?  ──▶ return best deliverable
+                       else   ──▶ next round with a new goal
 ```
 
-**Round loop** (`CADTopoSystem.run`, see its docstring for the full detail):
+The manager halts as soon as the deliverable's score Φ crosses the success threshold; otherwise it keeps steering until the round cap is reached. The final answer is the highest-scoring round's deliverable.
 
-1. **Coarse selection** — the router embeds the round's goal and keeps every
-   agent whose static skill description clears a similarity threshold θ.
-2. **Barrier** — every selected agent runs exactly one pass, in parallel,
-   conditioned only on the task, its own memory, and the round goal. Each
-   pass yields a public message (the contribution), a private message (a
-   hand-off note for whoever ends up reading it), and a query/key
-   descriptor pair (what it needs / what it offers).
-3. **Topology induction** — the router embeds every agent's key/query text
-   and scores each ordered pair `(i, j)` on offer→demand fit, `i`'s
-   self-assessed accuracy, and `i`'s cost. Pairs above a threshold τ become
-   directed edges; edges gate which private messages a later round's
-   agents will see, not this round's execution.
-4. **Manager review** — the manager reads the round's goal and every public
-   message, scores the best candidate's completeness (Φ ∈ [0, 1]), and
-   either halts (Φ ≥ γ) or drafts a focused goal for the next round.
+### Core building blocks
 
-The deliverable is always the highest-Φ round's best output — never a
-separate synthesis pass.
+| Component | What it does |
+| --- | --- |
+| `Agent` | A specialised worker (a role + a model ladder + optional tools). |
+| `Router` | Coarse-selects agents and induces the per-round topology. |
+| `Manager` | The meta-agent: scores each round, picks the deliverable, decides when to stop. |
+| `CostAwareSelector` | Picks which model rung each component runs on this round. |
+| `CadTopoAI` | The orchestrator that ties it all together and runs the rounds. |
 
-## Install
+---
+
+## Installation
+
+CADTopo targets **Python ≥ 3.10**. We recommend [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-pip install -e ".[dev]"
-# or, with uv:
-uv sync --extra dev
+git clone https://github.com/code0-tech/cadtopo.git
+cd cadtopo
+uv sync            # install dependencies into a local .venv
 ```
 
-Requires Python ≥3.10. `sentence-transformers`/`torch` are used for the
-local embedding backend; the LLM calls themselves go through
-[LiteLLM](https://github.com/BerriAI/litellm), so any LiteLLM-supported
-provider works.
+Or with plain `pip`:
 
-## Quick start
+```bash
+pip install -e .
+```
+
+Models are called through [LiteLLM](https://docs.litellm.ai/docs/providers), so you can use OpenAI, Anthropic, OpenRouter, local models, and more — just by changing the model string.
+
+---
+
+## Quickstart
 
 ```python
-from cadtopo import CADTopoSystem, CADTopoRouter, ManagerModel, SubModel, EmbeddingModel
+from cadtopo import Agent, Backbone, Router, Manager, EmbeddingModel, CadTopoAI
 
+# 1. Define your agents (each with a role and a model).
 agents = [
-    SubModel(
+    Agent(
         name="Developer",
-        skill_definition="Implement complete, runnable code.",
-        system_prompt="You are Developer, the Code Implementation Specialist. ...",
-        cost_per_token=1.0,
+        skill_definition="Writes the Python implementation.",
+        system_prompt="You are a senior Python developer. Return only the function.",
         api_provider="openrouter/meta-llama/llama-3.1-8b-instruct",
         api_key="sk-...",
     ),
-    # ... more roles
+    Agent(
+        name="Tester",
+        skill_definition="Reviews and validates the implementation.",
+        system_prompt="You are a QA engineer. Point out any bugs.",
+        api_provider="openrouter/meta-llama/llama-3.1-8b-instruct",
+        api_key="sk-...",
+    ),
 ]
 
-router = CADTopoRouter(agents=agents, embedding_model=EmbeddingModel(), theta=0.2, tau=0.3)
-manager = ManagerModel(api_provider="openrouter/meta-llama/llama-3.1-8b-instruct", api_key="sk-...")
-system = CADTopoSystem(manager=manager, router=router, weights=(0.8, 0.1, 0.1), max_rounds=10)
+# 2. Wire the router and manager.
+router = Router(agents=agents, embedding_model=EmbeddingModel())
+manager = Manager(api_provider="openrouter/meta-llama/llama-3.1-8b-instruct", api_key="sk-...")
 
+# 3. Build the system and run it.
+system = CadTopoAI(manager=manager, router=router, max_rounds=5)
 answer = system.run("Implement a function that reverses a string.")
+print(answer)
 ```
 
-Every `SubModel.step` response must follow a small delimiter protocol
-(`QUERY:`/`KEY:`/`ACCURACY:` header lines, then `===PRIVATE===`/`===PUBLIC===`
-sections) — see `SubModel._STEP_FORMAT` and `cadtopo.parsing.parse_agent_step`.
-Bake the equivalent instructions into each agent's `system_prompt`, or reuse
-the ones in `examples/run_humaneval.py`, which appends them automatically.
+### Giving an agent a cost-aware model ladder
 
-### Example: HumanEval
+Pass multiple `Backbone`s instead of a single model, cheapest first. The selector climbs the ladder only when an agent is unsure or the round budget runs low:
 
-`examples/run_humaneval.py` wires up DyTopo's four code-generation roles
-(Developer, Researcher, Tester, Designer) and evaluates the system against a
-random HumanEval sample, with full run tracing:
+```python
+Agent(
+    name="Developer",
+    skill_definition="Writes the Python implementation.",
+    backbones=[
+        Backbone(model="openrouter/meta-llama/llama-3.1-8b-instruct", cost=0.06, api_key="sk-..."),
+        Backbone(model="openrouter/anthropic/claude-3.5-sonnet",      cost=0.20, api_key="sk-..."),
+        Backbone(model="openrouter/openai/gpt-5",                     cost=30.0, api_key="sk-..."),
+    ],
+)
+```
+
+Only the *relative* order of the `cost` values matters to the selector.
+
+---
+
+## Example: HumanEval
+
+A complete, runnable example lives in [`examples/humaneval/`](examples/humaneval/). It runs a four-role team (Researcher, Designer, Developer, Tester) over the [HumanEval](https://github.com/openai/human-eval) coding benchmark and reports pass@1 plus a per-model cost breakdown.
 
 ```bash
-export PROVIDER=openrouter/meta-llama/llama-3.1-8b-instruct
-export AUTH=sk-...
-python examples/run_humaneval.py
+cd examples/humaneval
+cp .env.example .env          # then fill in PROVIDER and AUTH
+uv run humaneval.py
 ```
 
-Traces (every LLM call, every round's induced topology, the final answer,
-and pass/fail) are written to `runs/<timestamp>/traces.jsonl` (machine
-readable) and `runs/<timestamp>/traces.txt` (human readable).
+The agents' roles and prompts are plain Markdown under `agents/<role>/` — edit them to change behaviour, no Python needed. Set `BASELINE=1` to bypass CADTopo and get a single-pass reference number on the same tasks.
 
-## Testing
+---
+
+## Project layout
+
+```
+src/cadtopo/
+  orchestrator.py   # CadTopoAI — runs the rounds
+  router.py         # coarse selection + topology induction
+  manager.py        # the meta-agent (scoring, halting, next goal)
+  agent.py          # the worker agent
+  selection.py      # cost-aware model-ladder selection
+  backbone.py       # a single model + its cost
+  embedding.py      # skill/goal/query/key matching
+  tools.py          # native tool-calling support
+  schema/           # pydantic schemas for structured LLM output
+examples/humaneval/ # end-to-end benchmark example
+tests/              # test suite
+```
+
+Run the tests with:
 
 ```bash
-pytest
-# with coverage:
-pytest --cov=cadtopo
+uv run pytest
 ```
 
-All LLM calls and the embedding backend are mocked or faked in tests — the
-suite runs offline, with no network access and no real model calls. The one
-exception is `tests/test_humaneval.py`'s evaluator tests, which execute
-generated Python in a real subprocess (by design — that's what the
-evaluator does), but only against fixed, trusted snippets.
+---
 
-## Design notes
+## License
 
-- **Halting is a threshold, not a self-report.** Early experiments had the
-  manager assert a yes/no "is this done?" bit directly, which made weaker
-  backbones loop forever — there was always some plausible reason to answer
-  "not yet". Scoring completeness as Φ ∈ [0, 1] and deriving the halting bit
-  from `Φ ≥ γ_success` fixed this.
-- **The manager doesn't choose the deliverable.** The round's best output is
-  fixed mechanically as the coarse-selected agent with the highest skill
-  match to the round's goal; the manager only scores that fixed pick and
-  proposes the next goal. This keeps its job to *judging*, not *picking*,
-  which measurably improved reliability on weaker backbones.
-- **Everything parses as delimited text, not JSON.** Weak backbones reliably
-  produce `LABEL: value` lines and `===MARKER===` sections, but reliably
-  fail to JSON-escape a field once it contains code, quotes, or newlines.
-  `cadtopo.parsing` standardises on the delimiter protocol everywhere
-  (worker steps and manager reviews alike) instead.
+Licensing varies per component. See the [LICENSE](LICENSE) file in this repository and in each subproject for details.
 
-## Scope
+---
 
-This repository holds the orchestration framework and one worked example
-(HumanEval). It intentionally leaves out one-off experiment scripts from the
-original research repo (a static-pipeline baseline for comparison, a
-LiveBench harness, a trace-analysis notebook) — those depend on this
-framework's public API and can be ported the same way if needed.
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/CodeZero_Icon_White.svg">
+  <img src="images/CodeZero_Icon.svg" alt="CodeZero icon" width="48">
+</picture>
+
+*Made with ❤️ by the CodeZero community*
+
+</div>
